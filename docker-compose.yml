@@ -1,0 +1,146 @@
+# Prototipo 1 - ArquiSoft
+# HU-10: Levantar todo el sistema con un solo comando.
+#
+#   docker compose up --build
+#
+# Servicios:
+#   - postgres : BD de "Pagos y usuarios" (usuarios, saldos, apuestas, ledger)
+#   - mongo    : BD del "Motor de apuestas" (datos de carrera, mercados, contexto)
+#   - pagos    : servicio Pagos y usuarios (Python / FastAPI)  -> REST
+#   - motor    : motor de apuestas (Go)                        -> REST + WebSocket
+#   - front    : interfaz web (React + Vite servido por Nginx)
+#
+# Toda la configuración vive en el archivo .env (ver .env.example).
+
+name: arquisoft-prototipo1
+
+services:
+  # ---------------------------------------------------------------------------
+  # Bases de datos
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:17-alpine
+    container_name: arqui_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - arqui_net
+
+  mongo:
+    image: mongo:7
+    container_name: arqui_mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DB}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - arqui_net
+
+  # ---------------------------------------------------------------------------
+  # Pagos y usuarios (Python / FastAPI) - dueño de PostgreSQL
+  # ---------------------------------------------------------------------------
+  pagos:
+    build:
+      context: ./services/pagos
+    container_name: arqui_pagos
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES}
+      COP_PER_TOKEN: ${COP_PER_TOKEN}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_NAME: ${ADMIN_NAME}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PAGOS_PORT}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - arqui_net
+
+  # ---------------------------------------------------------------------------
+  # Motor de apuestas (Go) - dueño de MongoDB
+  # ---------------------------------------------------------------------------
+  motor:
+    build:
+      context: ./services/motor
+    container_name: arqui_motor
+    restart: unless-stopped
+    environment:
+      MONGO_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/${MONGO_DB}?authSource=admin
+      MONGO_DB: ${MONGO_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      PAGOS_BASE_URL: http://pagos:8000
+      BETTING_WINDOW_SECONDS: ${BETTING_WINDOW_SECONDS}
+      OBSERVATION_WINDOW_SECONDS: ${OBSERVATION_WINDOW_SECONDS}
+      HTTP_PORT: "8080"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      pagos:
+        condition: service_healthy
+    ports:
+      - "${MOTOR_PORT}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - arqui_net
+
+  # ---------------------------------------------------------------------------
+  # Front (React + Vite, servido por Nginx)
+  # ---------------------------------------------------------------------------
+  front:
+    build:
+      context: ./services/front
+      args:
+        # URLs que el bundle del front usa en el navegador del usuario.
+        VITE_PAGOS_URL: http://localhost:${PAGOS_PORT}
+        VITE_MOTOR_URL: http://localhost:${MOTOR_PORT}
+        VITE_MOTOR_WS_URL: ws://localhost:${MOTOR_PORT}
+    container_name: arqui_front
+    restart: unless-stopped
+    depends_on:
+      - pagos
+      - motor
+    ports:
+      - "${FRONT_PORT}:80"
+    networks:
+      - arqui_net
+
+networks:
+  arqui_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  mongo_data:
