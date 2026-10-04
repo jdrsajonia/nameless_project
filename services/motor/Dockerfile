@@ -3,12 +3,13 @@ FROM golang:1.25-alpine AS build
 
 WORKDIR /src
 
-# Resolver dependencias. go.sum se genera aqui si no existe.
-COPY go.mod go.sum* ./
-RUN go mod download || true
+# Dependencias primero para aprovechar la cache de Docker. go.sum esta
+# versionado: el build usa exactamente esas versiones (no se corre go mod tidy).
+COPY go.mod go.sum ./
+RUN go mod download
 
 COPY . .
-RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -o /motor .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /motor .
 
 # ---- runtime ----
 FROM alpine:3.20

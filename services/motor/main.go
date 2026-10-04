@@ -1,152 +1,84 @@
 // Motor de apuestas - Prototipo 1 (ArquiSoft).
 //
-// Esqueleto base (HU-10). Arranca un servidor HTTP con:
-//   - GET /health : healthcheck (servicio vivo + MongoDB responde)
-//   - GET /ws     : endpoint WebSocket base (hub) para datos en vivo
+// main solo arma las piezas y arranca el servidor. Cada modulo vive en su
+// propio paquete bajo internal/ y registra sus rutas con Register(mux, ...),
+// para que cada HU se agregue sin editar el codigo de las demas.
 //
-// La logica de negocio (ingesta OpenF1, mercados, apuestas, liquidacion)
-// se construye encima de esta base en tareas posteriores.
+//   - GET /health : healthcheck (503 si MongoDB no responde)
+//   - GET /ws     : WebSocket para datos en vivo
 package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"github.com/arquisoft/motor/internal/config"
+	"github.com/arquisoft/motor/internal/health"
+	"github.com/arquisoft/motor/internal/httpx"
+	"github.com/arquisoft/motor/internal/mongodb"
+	"github.com/arquisoft/motor/internal/ws"
 )
 
-type config struct {
-	mongoURI       string
-	mongoDB        string
-	httpPort       string
-	jwtSecret      string
-	pagosBaseURL   string
-	bettingWindow  string
-	observationWin string
-}
-
-func loadConfig() config {
-	return config{
-		mongoURI:       getenv("MONGO_URI", "mongodb://arqui:arqui_pass@localhost:27017/arqui_motor?authSource=admin"),
-		mongoDB:        getenv("MONGO_DB", "arqui_motor"),
-		httpPort:       getenv("HTTP_PORT", "8080"),
-		jwtSecret:      getenv("JWT_SECRET", "dev-secret"),
-		pagosBaseURL:   getenv("PAGOS_BASE_URL", "http://localhost:8000"),
-		bettingWindow:  getenv("BETTING_WINDOW_SECONDS", "30"),
-		observationWin: getenv("OBSERVATION_WINDOW_SECONDS", "60"),
-	}
-}
-
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-type server struct {
-	cfg   config
-	mongo *mongo.Client
-	hub   *Hub
-}
-
 func main() {
-	cfg := loadConfig()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI(cfg.mongoURI))
+	cfg, err := config.Cargar()
 	if err != nil {
-		log.Fatalf("no se pudo conectar a MongoDB: %v", err)
+		log.Fatalf("configuracion invalida: %v", err)
 	}
-	if err := client.Ping(ctx, readpref.Primary()); err != nil {
-		log.Fatalf("MongoDB no responde al ping: %v", err)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	ctxConexion, cancel := context.WithTimeout(ctx, 10*time.Second)
+	db, err := mongodb.Conectar(ctxConexion, cfg.MongoURI, cfg.MongoDB)
+	cancel()
+	if err != nil {
+		log.Fatal(err)
 	}
-	log.Println("conectado a MongoDB")
+	log.Printf("conectado a MongoDB (base %s)", cfg.MongoDB)
 
-	hub := newHub()
-	go hub.run()
+	hub := ws.NuevoHub()
+	go hub.Run(ctx)
 
-	s := &server{cfg: cfg, mongo: client, hub: hub}
+	origenes := httpx.NuevosOrigenes(cfg.OrigenesPermitidos)
+
+	// TODO(tanda 2): reemplazar por la validacion del JWT de la cookie.
+	sinAutenticacion := ws.IdentificadorFunc(func(*http.Request) (string, error) { return "", nil })
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/", s.handleRoot)
+	health.Register(mux, db)
+	ws.Register(mux, hub, sinAutenticacion, origenes.Permite)
+	// Aqui se registran los modulos de cada HU, p. ej.:
+	//   posiciones.Register(mux, db.DB, hub)   // HU-05
+	//   mercados.Register(mux, db.DB, hub, cfg) // HU-11
 
-	addr := ":" + cfg.httpPort
-	log.Printf("motor escuchando en %s", addr)
-	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
+	srv := &http.Server{
+		Addr:              ":" + cfg.HTTPPort,
+		Handler:           httpx.CORS(origenes, mux),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		log.Println("apagando el motor...")
+		ctxApagado, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctxApagado)
+	}()
+
+	log.Printf("motor escuchando en %s", srv.Addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("servidor HTTP termino: %v", err)
 	}
-}
 
-// withCORS agrega cabeceras CORS a las respuestas REST para que el front
-// (servido en otro origen/puerto) pueda consumir la API desde el navegador.
-// El WebSocket no pasa por aqui porque no esta sujeto a la politica CORS.
-// Para el prototipo se permite cualquier origen; restringir en entregas futuras.
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	ctxCierre, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	mongoOK := s.mongo.Ping(ctx, readpref.Primary()) == nil
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"service": "motor",
-		"status":  "ok",
-		"mongo":   mongoOK,
-	})
-}
-
-func (s *server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"service": "motor",
-		"message": "Motor de apuestas - Prototipo 1",
-	})
-}
-
-// upgrader para la conexion WebSocket. En el prototipo se acepta cualquier
-// origen; mas adelante se valida el JWT al abrir la conexion (RNF-06).
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("error al abrir WebSocket: %v", err)
-		return
+	if err := db.Cerrar(ctxCierre); err != nil {
+		log.Printf("error al cerrar MongoDB: %v", err)
 	}
-	client := &Client{hub: s.hub, conn: conn, send: make(chan []byte, 16)}
-	s.hub.register <- client
-
-	go client.writePump()
-	go client.readPump()
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
 }
