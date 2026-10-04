@@ -24,7 +24,7 @@ dist-ssr
 *.sln
 *.sw?
 
+# Variables de entorno (contienen secretos). Versionar solo .env.example
 .env
-.env.local
-.env.*.local
-.env.production.local
+.env.*
+!.env.example
