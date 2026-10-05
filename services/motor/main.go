@@ -5,7 +5,7 @@
 // para que cada HU se agregue sin editar el codigo de las demas.
 //
 //   - GET /health : healthcheck (503 si MongoDB no responde)
-//   - GET /ws     : WebSocket para datos en vivo
+//   - GET /ws     : WebSocket para datos en vivo (exige la cookie de sesion)
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arquisoft/motor/internal/auth"
 	"github.com/arquisoft/motor/internal/config"
 	"github.com/arquisoft/motor/internal/health"
 	"github.com/arquisoft/motor/internal/httpx"
@@ -47,15 +48,20 @@ func main() {
 
 	origenes := httpx.NuevosOrigenes(cfg.OrigenesPermitidos)
 
-	// TODO(tanda 2): reemplazar por la validacion del JWT de la cookie.
-	sinAutenticacion := ws.IdentificadorFunc(func(*http.Request) (string, error) { return "", nil })
+	// El JWT lo emite Pagos; el motor solo verifica la firma con el secreto
+	// compartido (RNF-06). Contrato en internal/auth/contrato.go.
+	validador, err := auth.NuevoValidador(cfg.JWTSecret)
+	if err != nil {
+		log.Fatal(err)
+	}
+	autenticador := auth.NuevoAutenticador(validador)
 
 	mux := http.NewServeMux()
 	health.Register(mux, db)
-	ws.Register(mux, hub, sinAutenticacion, origenes.Permite)
+	ws.Register(mux, hub, autenticador, origenes.Permite)
 	// Aqui se registran los modulos de cada HU, p. ej.:
-	//   posiciones.Register(mux, db.DB, hub)   // HU-05
-	//   mercados.Register(mux, db.DB, hub, cfg) // HU-11
+	//   posiciones.Register(mux, db.DB, hub)                 // HU-05
+	//   mercados.Register(mux, db.DB, hub, autenticador, cfg) // HU-11
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,

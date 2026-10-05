@@ -39,8 +39,10 @@ func Handler(hub *Hub, id Identificador, origenPermitido func(origen string) boo
 			http.Error(w, "origen no permitido", http.StatusForbidden)
 			return
 		}
+		// Sin user_id no se le podria enviar su resultado (HU-08): se rechaza
+		// igual que una sesion invalida.
 		userID, err := id.Identificar(r)
-		if err != nil {
+		if err != nil || userID == "" {
 			http.Error(w, "no autorizado", http.StatusUnauthorized)
 			return
 		}

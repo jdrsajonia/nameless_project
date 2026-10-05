@@ -16,10 +16,14 @@ import (
 const origenFront = "http://localhost:5173"
 
 // identificadorPrueba toma el user_id del parametro ?u= (en produccion sale
-// del JWT). Sin parametro rechaza la conexion.
+// del JWT). Sin parametro rechaza la conexion; con ?vacio=1 simula un
+// identificador que no falla pero no entrega user_id.
 var identificadorPrueba = IdentificadorFunc(func(r *http.Request) (string, error) {
 	if u := r.URL.Query().Get("u"); u != "" {
 		return u, nil
+	}
+	if r.URL.Query().Get("vacio") == "1" {
+		return "", nil
 	}
 	return "", errors.New("sin sesion")
 })
@@ -145,6 +149,7 @@ func TestRechazos(t *testing.T) {
 		status                int
 	}{
 		{"sin sesion", "", origenFront, http.StatusUnauthorized},
+		{"user_id vacio", "?vacio=1", origenFront, http.StatusUnauthorized},
 		{"origen ajeno", "?u=1", "http://sitio-malicioso.com", http.StatusForbidden},
 	}
 	for _, c := range casos {

@@ -10,16 +10,40 @@ internal/config      # variables de entorno (las obligatorias no tienen valor po
 internal/mongodb     # conexión a MongoDB
 internal/httpx       # JSON y CORS compartidos
 internal/health      # GET /health (503 si MongoDB no responde)
+internal/auth        # valida el JWT de Pagos; middleware REST y WebSocket
 internal/ws          # hub de WebSocket: GET /ws, Difundir y EnviarA
 ```
 
 Para agregar una HU, crea un paquete en `internal/` con una función `Register(mux, ...)` y llámala desde `main.go`. Así nadie edita el paquete de otro:
 
 ```go
-func Register(mux *http.ServeMux, db *mongo.Database, hub *ws.Hub) {
-	mux.HandleFunc("POST /mercados", ...)
+func Register(mux *http.ServeMux, db *mongo.Database, hub *ws.Hub, a *auth.Autenticador) {
+	mux.Handle("POST /mercados", a.ExigirRol(auth.RolAdmin, http.HandlerFunc(abrir)))
 }
 ```
+
+## Autenticación (RNF-06)
+
+Pagos emite el JWT al iniciar sesión y lo guarda en una cookie HttpOnly. El motor **no le pregunta a Pagos**: verifica la firma por su cuenta con el secreto compartido `JWT_SECRET`.
+
+Contrato acordado (en `internal/auth/contrato.go`, **pendiente de confirmar con Pagos**):
+
+| Qué | Valor |
+| --- | --- |
+| Algoritmo | `HS256` (cualquier otro, incluido `none`, se rechaza) |
+| Cookie | `session` |
+| Claim del usuario | `sub`: UUID como string |
+| Claim del rol | `rol`: `player` o `admin` |
+| Vencimiento | `exp` obligatorio (Pagos lo fija con `JWT_EXPIRE_MINUTES`) |
+
+Cómo proteger una ruta:
+
+```go
+mux.Handle("POST /apuestas", a.ExigirSesion(http.HandlerFunc(apostar)))                // 401 sin sesión
+mux.Handle("POST /mercados", a.ExigirRol(auth.RolAdmin, http.HandlerFunc(abrirMercado))) // 403 si no es admin
+```
+
+Dentro del handler, `sesion, _ := auth.SesionDe(r.Context())` entrega `sesion.UserID` y `sesion.Rol`.
 
 ## Variables de entorno
 
@@ -38,7 +62,7 @@ Si falta una obligatoria, el motor no arranca y el log dice cuál falta.
 
 ## Mensajes del WebSocket
 
-El front se conecta a `ws://localhost:8080/ws`. Solo se aceptan conexiones desde un origen de `ALLOWED_ORIGINS`.
+El front se conecta a `ws://localhost:8080/ws`. La conexión exige la cookie `session` con un JWT válido (si no, 401) y un origen de `ALLOWED_ORIGINS` (si no, 403). El navegador envía la cookie solo; el front no tiene que hacer nada extra.
 
 Todo mensaje que envía el motor tiene la misma forma:
 
