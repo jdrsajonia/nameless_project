@@ -11,15 +11,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app import models  # noqa: F401  (registra los modelos en Base.metadata)
 from app.config import settings
-from app.db import engine
+from app.db import Base, engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Al arrancar: verificar que PostgreSQL responde.
+    # Al arrancar: verificar que PostgreSQL responde y crear las tablas que
+    # falten. create_all no modifica tablas existentes: si cambia un modelo,
+    # hay que recrear el volumen (docker compose down -v) o migrar.
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
+    Base.metadata.create_all(bind=engine)
     yield
 
 
