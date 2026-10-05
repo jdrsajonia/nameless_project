@@ -11,7 +11,7 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMensajeLeer = 4096
-	tamBufferEnvio = 32
+	tamBufferEnvio = 64
 )
 
 type cliente struct {
