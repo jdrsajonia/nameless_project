@@ -98,6 +98,7 @@ services:
       MONGO_DB: ${MONGO_DB}
       JWT_SECRET: ${JWT_SECRET}
       PAGOS_BASE_URL: http://pagos:8000
+      PAGOS_MOCK: ${PAGOS_MOCK:-false}   # true = débitos simulados (HU-06) mientras Pagos no tenga /internal/debit
       BETTING_WINDOW_SECONDS: ${BETTING_WINDOW_SECONDS}
       OBSERVATION_WINDOW_SECONDS: ${OBSERVATION_WINDOW_SECONDS}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS}

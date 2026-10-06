@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import DemoApuesta from "./apuestas/DemoApuesta.jsx";
 
 // URLs inyectadas en build time por Vite (ver docker-compose: build.args).
 const PAGOS_URL = import.meta.env.VITE_PAGOS_URL ?? "http://localhost:8000";
@@ -73,6 +74,8 @@ export default function App() {
         <br />
         {ws}
       </div>
+
+      <DemoApuesta />
     </main>
   );
 }

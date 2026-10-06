@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/arquisoft/motor/internal/apuestas"
 	"github.com/arquisoft/motor/internal/auth"
 	"github.com/arquisoft/motor/internal/config"
 	"github.com/arquisoft/motor/internal/health"
@@ -59,6 +60,7 @@ func main() {
 	mux := http.NewServeMux()
 	health.Register(mux, db)
 	ws.Register(mux, hub, autenticador, origenes.Permite)
+	registrarApuestas(mux, db, cfg, autenticador) // HU-06
 	// Aqui se registran los modulos de cada HU, p. ej.:
 	//   posiciones.Register(mux, db.DB, hub)                 // HU-05
 	//   mercados.Register(mux, db.DB, hub, autenticador, cfg) // HU-11
@@ -87,4 +89,29 @@ func main() {
 	if err := db.Cerrar(ctxCierre); err != nil {
 		log.Printf("error al cerrar MongoDB: %v", err)
 	}
+}
+
+// registrarApuestas arma HU-06 (POST /apuestas, solo jugadores). Con
+// PAGOS_MOCK=true usa un Pagos simulado (1000 tokens por usuario) mientras el
+// endpoint real de debito no exista; sin esa variable llama a Pagos por REST.
+func registrarApuestas(mux *http.ServeMux, db *mongodb.Conexion, cfg config.Config, a *auth.Autenticador) {
+	var pagos apuestas.Pagos
+	if os.Getenv("PAGOS_MOCK") == "true" {
+		log.Println("ATENCION: PAGOS_MOCK=true, los debitos son simulados")
+		pagos = apuestas.NuevoPagosMock(1000)
+	} else {
+		pagos = apuestas.NuevoPagosHTTP(cfg.PagosBaseURL)
+	}
+	svc := apuestas.NuevoServicio(
+		apuestas.NuevosMercadosMongo(db.DB),
+		pagos,
+		apuestas.NuevosContextosMongo(db.DB),
+	)
+	apuestas.Register(mux, svc,
+		func(h http.Handler) http.Handler { return a.ExigirRol(auth.RolJugador, h) },
+		func(r *http.Request) (string, bool) {
+			s, ok := auth.SesionDe(r.Context())
+			return s.UserID, ok
+		},
+	)
 }
