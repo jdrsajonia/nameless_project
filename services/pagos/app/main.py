@@ -1,56 +1,67 @@
 """Servicio Pagos y usuarios - Prototipo 1 (ArquiSoft).
 
-Esqueleto base (HU-10). Expone /health para que docker compose verifique que
-el servicio esta vivo y conectado a PostgreSQL. Las HU de negocio (registro,
-login, compra de tokens, debito de apuesta, liquidacion) se construyen encima
-de esta base en tareas posteriores.
+Punto de entrada de FastAPI. Aqui solo se arma la aplicacion: configuracion,
+CORS, conexion a PostgreSQL y registro de routers. Las HU de negocio
+(registro, login, compra de tokens, debito de apuesta, liquidacion) se agregan
+como routers nuevos en app/routers/ (ver app/routers/__init__.py).
+
+Estructura:
+    app/
+    ├── main.py        # crea la app (este archivo)
+    ├── core/config.py # variables de entorno
+    ├── core/security.py # hash de contrasenas y JWT (contrato con el motor)
+    ├── db.py          # engine, sesiones, espera e inicializacion de la BD
+    ├── deps.py        # dependencias: DbSession, CurrentUser, AdminUser
+    ├── models.py      # tablas (ver documentation/modelo-datos-pagos.pdf)
+    ├── schemas/       # modelos Pydantic de entrada/salida
+    ├── routers/       # endpoints REST, uno por tema
+    └── services/      # logica de negocio
 """
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
 
-from app import models  # noqa: F401  (registra los modelos en Base.metadata)
-from app.config import settings
-from app.db import Base, engine
+from app.core.config import settings
+from app.db import init_db, wait_for_db
+from app.routers import ROUTERS
+from app.schemas.common import MessageOut
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("pagos")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Al arrancar: verificar que PostgreSQL responde y crear las tablas que
-    # falten. create_all no modifica tablas existentes: si cambia un modelo,
-    # hay que recrear el volumen (docker compose down -v) o migrar.
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    Base.metadata.create_all(bind=engine)
+    # Al arrancar: esperar a PostgreSQL y crear las tablas que falten.
+    wait_for_db()
+    init_db()
+    logger.info("Pagos listo. CORS permitido para: %s", settings.allowed_origins)
     yield
 
 
-app = FastAPI(title="Pagos y usuarios", version="0.1.0", lifespan=lifespan)
+def create_app() -> FastAPI:
+    app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
 
-# El front corre en otro origen (puerto distinto), por eso habilitamos CORS.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # para el prototipo; restringir en entregas posteriores
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    # El front corre en otro origen y envia la cookie de sesion, por eso los
+    # origenes deben ser explicitos (con credentials no se permite "*").
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    for router in ROUTERS:
+        app.include_router(router)
+
+    @app.get("/", response_model=MessageOut, tags=["health"])
+    def root() -> MessageOut:
+        return MessageOut(service="pagos", message="Pagos y usuarios - Prototipo 1")
+
+    return app
 
 
-@app.get("/health")
-def health():
-    """Healthcheck: el servicio esta arriba y PostgreSQL responde."""
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        db_ok = True
-    except Exception:
-        db_ok = False
-    return {"service": "pagos", "status": "ok", "postgres": db_ok}
-
-
-@app.get("/")
-def root():
-    return {"service": "pagos", "message": "Pagos y usuarios - Prototipo 1"}
+app = create_app()
